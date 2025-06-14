@@ -18,7 +18,7 @@ impl GameData {
     pub fn get_registry_entries(&self, registry_name: &str) -> Result<Vec<(String, Vec<u8>)>> {
         // The provided registry_name might be fully qualified (e.g., "minecraft:dimension_type")
         // but the JSON key might not be. We'll try both.
-        let short_name = registry_name.split(':').last().unwrap_or(registry_name);
+        let short_name = registry_name.split(':').next_back().unwrap_or(registry_name);
 
         let json_str = include_str!("registry_data.json");
         let full_data: serde_json::Value =
