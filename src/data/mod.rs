@@ -66,14 +66,18 @@ fn json_to_nbt_bytes(json_value: &serde_json::Value) -> Result<Vec<u8>> {
 fn json_to_fastnbt_value(json_value: &serde_json::Value) -> Result<fastnbt::Value> {
     match json_value {
         serde_json::Value::Null => {
-            Ok(fastnbt::Value::String("".to_string())) // Consistent null handling
+            // Represent JSON null as an empty NBT string, as there's no null NBT type.
+            Ok(fastnbt::Value::String("".to_string()))
         }
         serde_json::Value::Bool(b) => {
-            Ok(fastnbt::Value::Byte(if *b { 1 } else { 0 })) // Correct for boolean as byte
+            // JSON booleans are equivalent to NBT Bytes.
+            Ok(fastnbt::Value::Byte(if *b { 1 } else { 0 }))
         }
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                // Prioritize smallest integer type for exact matches.
+                // For integers from JSON, use the smallest possible NBT integer type.
+                // This correctly handles numeric boolean flags (like bed_works: 1) as TAG_Byte,
+                // while larger numbers become Short, Int, or Long as appropriate.
                 if i >= i8::MIN as i64 && i <= i8::MAX as i64 {
                     Ok(fastnbt::Value::Byte(i as i8))
                 } else if i >= i16::MIN as i64 && i <= i16::MAX as i64 {
