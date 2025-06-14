@@ -35,6 +35,7 @@
 #![deny(clippy::too_many_lines, missing_docs, clippy::panic)]
 
 pub mod config;
+pub mod data;
 pub mod error;
 pub mod game;
 pub mod logger;
