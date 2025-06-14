@@ -77,7 +77,7 @@ fn json_to_fastnbt_value(json_value: &serde_json::Value) -> Result<fastnbt::Valu
                 // **CRITICAL CHANGE HERE: Always use Double for floats**
                 // Unless a specific NBT schema tells us it *must* be a Float.
                 // This avoids precision/size mismatches that lead to decoding errors.
-                Ok(fastnbt::Value::Double(f)) 
+                Ok(fastnbt::Value::Double(f))
             } else {
                 Err(ServerError::Protocol(
                     "Invalid number format in JSON NBT conversion".to_string(),
@@ -108,12 +108,36 @@ fn json_to_fastnbt_value(json_value: &serde_json::Value) -> Result<fastnbt::Valu
                     break;
                 }
             }
-            
+
             if is_homogenous_primitive {
                 match all_same_type_id {
-                    Some(1) => Ok(fastnbt::Value::ByteArray(fastnbt::ByteArray::new(generic_list_elements.into_iter().map(|v| match v {fastnbt::Value::Byte(b)=>b, _=>0}).collect()))),
-                    Some(3) => Ok(fastnbt::Value::IntArray(fastnbt::IntArray::new(generic_list_elements.into_iter().map(|v| match v {fastnbt::Value::Int(i)=>i, _=>0}).collect()))),
-                    Some(4) => Ok(fastnbt::Value::LongArray(fastnbt::LongArray::new(generic_list_elements.into_iter().map(|v| match v {fastnbt::Value::Long(l)=>l, _=>0}).collect()))),
+                    Some(1) => Ok(fastnbt::Value::ByteArray(fastnbt::ByteArray::new(
+                        generic_list_elements
+                            .into_iter()
+                            .map(|v| match v {
+                                fastnbt::Value::Byte(b) => b,
+                                _ => 0,
+                            })
+                            .collect(),
+                    ))),
+                    Some(3) => Ok(fastnbt::Value::IntArray(fastnbt::IntArray::new(
+                        generic_list_elements
+                            .into_iter()
+                            .map(|v| match v {
+                                fastnbt::Value::Int(i) => i,
+                                _ => 0,
+                            })
+                            .collect(),
+                    ))),
+                    Some(4) => Ok(fastnbt::Value::LongArray(fastnbt::LongArray::new(
+                        generic_list_elements
+                            .into_iter()
+                            .map(|v| match v {
+                                fastnbt::Value::Long(l) => l,
+                                _ => 0,
+                            })
+                            .collect(),
+                    ))),
                     _ => Ok(fastnbt::Value::List(generic_list_elements)), // Fallback to generic list (TAG_List)
                 }
             } else {
