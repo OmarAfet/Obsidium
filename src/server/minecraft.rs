@@ -283,7 +283,6 @@ impl MinecraftServer {
                 uuid: login_start.player_uuid,
                 username: login_start.name.clone(),
                 properties: Vec::new(),
-                strict_error_handling: false,
             };
             connection.write_packet(&login_success).await?;
 

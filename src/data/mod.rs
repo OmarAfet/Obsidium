@@ -45,11 +45,21 @@ fn json_to_nbt_bytes(json_value: &serde_json::Value) -> Result<Vec<u8>> {
     let nbt_value = json_to_fastnbt_value(json_value)?;
 
     // For registry data, the NBT is expected to be a root Compound tag.
-    // fastnbt::to_bytes correctly handles the root tag ID (0x0A) and empty name (0x00 0x00).
+    // Since Minecraft 1.20.2 (protocol 764), NBT sent over the network excludes
+    // the root compound tag's header (tag ID and name). We need to serialize
+    // just the payload.
     let buffer = fastnbt::to_bytes(&nbt_value)
         .map_err(|e| ServerError::Protocol(format!("Failed to serialize NBT: {}", e)))?;
 
-    Ok(buffer)
+    // fastnbt::to_bytes produces [0x0A, 0x00, 0x00, ...payload...]
+    // We need to skip the first 3 bytes (tag ID + empty name) for network protocol
+    if buffer.len() < 3 {
+        return Err(ServerError::Protocol(
+            "Invalid NBT serialization: buffer too short".to_string(),
+        ));
+    }
+
+    Ok(buffer[3..].to_vec())
 }
 
 /// Convert a JSON value to a fastnbt Value

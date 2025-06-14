@@ -43,8 +43,6 @@ pub struct LoginSuccessPacket {
     pub username: McString,
     /// Player properties
     pub properties: Vec<Property>,
-    /// Strict error handling enabled
-    pub strict_error_handling: bool,
 }
 
 impl Packet for LoginSuccessPacket {
@@ -61,13 +59,10 @@ impl Packet for LoginSuccessPacket {
             properties.push(Property::read(reader)?);
         }
 
-        let strict_error_handling = crate::protocol::types::read_bool(reader)?;
-
         Ok(LoginSuccessPacket {
             uuid,
             username,
             properties,
-            strict_error_handling,
         })
     }
 
@@ -80,8 +75,6 @@ impl Packet for LoginSuccessPacket {
             property.write(writer)?;
         }
 
-        // This line is the culprit. Ensure it is COMMENTED OUT or REMOVED.
-        // crate::protocol::types::write_bool(self.strict_error_handling, writer)?;
         Ok(())
     }
 }
