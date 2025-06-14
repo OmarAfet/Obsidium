@@ -44,122 +44,12 @@ fn json_to_nbt_bytes(json_value: &serde_json::Value) -> Result<Vec<u8>> {
     // Convert JSON Value to fastnbt Value
     let nbt_value = json_to_fastnbt_value(json_value)?;
 
-    // Serialize using fastnbt's proper NBT format.
-    // For registry data, the NBT is expected to be a CompoundTag
-    // whose contents are directly embedded, without its tag ID or name.
-    let mut buffer = Vec::new();
-
-    match nbt_value {
-        fastnbt::Value::Compound(compound) => {
-            // For registry data, we expect the data field to contain the NBT contents *without*
-            // the root TAG_Compound ID (0x0A) and its empty name (0x00 0x00).
-            // We'll manually serialize the compound's contents.
-            write_compound_contents(&mut buffer, &compound)?;
-        },
-        _ => {
-            // If it's not a compound (which most registry entries are), or for safety
-            // fall back to writing a full NBT blob, though this might still be incorrect
-            // for some contexts if the client strictly expects contents of a compound.
-            fastnbt::to_writer(&mut buffer, &nbt_value)
-                .map_err(|e| ServerError::Protocol(format!("Failed to serialize non-compound NBT: {}", e)))?;
-        }
-    }
+    // For registry data, the NBT is expected to be a root Compound tag.
+    // fastnbt::to_bytes correctly handles the root tag ID (0x0A) and empty name (0x00 0x00).
+    let buffer = fastnbt::to_bytes(&nbt_value)
+        .map_err(|e| ServerError::Protocol(format!("Failed to serialize NBT: {}", e)))?;
 
     Ok(buffer)
-}
-
-/// Write the contents of a compound tag without the tag ID and name
-fn write_compound_contents(buffer: &mut Vec<u8>, compound: &std::collections::HashMap<String, fastnbt::Value>) -> Result<()> {
-    for (key, value) in compound {
-        // Write tag ID
-        write_tag_id(buffer, value);
-        
-        // Write name length and name
-        let name_bytes = key.as_bytes();
-        buffer.extend_from_slice(&(name_bytes.len() as u16).to_be_bytes());
-        buffer.extend_from_slice(name_bytes);
-        
-        // Write value
-        write_tag_payload(buffer, value)?;
-    }
-    
-    // Write end tag (TAG_End = 0)
-    buffer.push(0);
-    
-    Ok(())
-}
-
-/// Write the tag ID for a given NBT value
-fn write_tag_id(buffer: &mut Vec<u8>, value: &fastnbt::Value) {
-    let tag_id = match value {
-        fastnbt::Value::Byte(_) => 1,
-        fastnbt::Value::Short(_) => 2,
-        fastnbt::Value::Int(_) => 3,
-        fastnbt::Value::Long(_) => 4,
-        fastnbt::Value::Float(_) => 5,
-        fastnbt::Value::Double(_) => 6,
-        fastnbt::Value::ByteArray(_) => 7,
-        fastnbt::Value::String(_) => 8,
-        fastnbt::Value::List(_) => 9,
-        fastnbt::Value::Compound(_) => 10,
-        fastnbt::Value::IntArray(_) => 11,
-        fastnbt::Value::LongArray(_) => 12,
-    };
-    buffer.push(tag_id);
-}
-
-/// Write the payload (value) of an NBT tag
-fn write_tag_payload(buffer: &mut Vec<u8>, value: &fastnbt::Value) -> Result<()> {
-    match value {
-        fastnbt::Value::Byte(b) => buffer.push(*b as u8),
-        fastnbt::Value::Short(s) => buffer.extend_from_slice(&s.to_be_bytes()),
-        fastnbt::Value::Int(i) => buffer.extend_from_slice(&i.to_be_bytes()),
-        fastnbt::Value::Long(l) => buffer.extend_from_slice(&l.to_be_bytes()),
-        fastnbt::Value::Float(f) => buffer.extend_from_slice(&f.to_be_bytes()),
-        fastnbt::Value::Double(d) => buffer.extend_from_slice(&d.to_be_bytes()),
-        fastnbt::Value::String(s) => {
-            let bytes = s.as_bytes();
-            buffer.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-            buffer.extend_from_slice(bytes);
-        },
-        fastnbt::Value::ByteArray(arr) => {
-            buffer.extend_from_slice(&(arr.len() as i32).to_be_bytes());
-            for byte in arr.iter() {
-                buffer.push(*byte as u8);
-            }
-        },
-        fastnbt::Value::IntArray(arr) => {
-            buffer.extend_from_slice(&(arr.len() as i32).to_be_bytes());
-            for int in arr.iter() {
-                buffer.extend_from_slice(&int.to_be_bytes());
-            }
-        },
-        fastnbt::Value::LongArray(arr) => {
-            buffer.extend_from_slice(&(arr.len() as i32).to_be_bytes());
-            for long in arr.iter() {
-                buffer.extend_from_slice(&long.to_be_bytes());
-            }
-        },
-        fastnbt::Value::List(list) => {
-            if list.is_empty() {
-                buffer.push(0); // TAG_End for empty list
-                buffer.extend_from_slice(&0i32.to_be_bytes()); // Length 0
-            } else {
-                // Write the tag type of list elements
-                write_tag_id(buffer, &list[0]);
-                // Write list length
-                buffer.extend_from_slice(&(list.len() as i32).to_be_bytes());
-                // Write each element's payload (without tag ID or name)
-                for item in list {
-                    write_tag_payload(buffer, item)?;
-                }
-            }
-        },
-        fastnbt::Value::Compound(compound) => {
-            write_compound_contents(buffer, compound)?;
-        },
-    }
-    Ok(())
 }
 
 /// Convert a JSON value to a fastnbt Value
