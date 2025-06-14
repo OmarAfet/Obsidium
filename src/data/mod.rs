@@ -84,10 +84,16 @@ fn json_to_fastnbt_value(json_value: &serde_json::Value) -> Result<fastnbt::Valu
                     Ok(fastnbt::Value::Long(i))
                 }
             } else if let Some(f) = n.as_f64() {
-                // **CRITICAL CHANGE HERE: Always use Double for floats**
-                // Unless a specific NBT schema tells us it *must* be a Float.
-                // This avoids precision/size mismatches that lead to decoding errors.
-                Ok(fastnbt::Value::Double(f))
+                // Minecraft's NBT format distinguishes between Float and Double.
+                // We can use a precision check to infer the correct type. If the
+                // f64 value can be represented as an f32 without loss of precision,
+                // we serialize it as a Float. Otherwise, we use a Double.
+                let f32_val = f as f32;
+                if (f32_val as f64) == f {
+                    Ok(fastnbt::Value::Float(f32_val))
+                } else {
+                    Ok(fastnbt::Value::Double(f))
+                }
             } else {
                 Err(ServerError::Protocol(
                     "Invalid number format in JSON NBT conversion".to_string(),
