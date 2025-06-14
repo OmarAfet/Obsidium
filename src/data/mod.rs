@@ -56,20 +56,14 @@ fn json_to_nbt_bytes(json_value: &serde_json::Value) -> Result<Vec<u8>> {
 fn json_to_fastnbt_value(json_value: &serde_json::Value) -> Result<fastnbt::Value> {
     match json_value {
         serde_json::Value::Null => {
-            // NBT doesn't have a direct null.
-            // If `registry_data.json` uses `null` for truly optional NBT fields,
-            // they should ideally be excluded from the NBT compound, not converted to an empty string.
-            // However, `serde_json::from_str` to `Value` will include them.
-            // A common convention is to map null to a default value, or filter it out.
-            // For now, let's stick with empty string, but keep this in mind for future debugging.
-            Ok(fastnbt::Value::String("".to_string()))
+            Ok(fastnbt::Value::String("".to_string())) // Consistent null handling
         }
         serde_json::Value::Bool(b) => {
-            Ok(fastnbt::Value::Byte(if *b { 1 } else { 0 }))
+            Ok(fastnbt::Value::Byte(if *b { 1 } else { 0 })) // Correct for boolean as byte
         }
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                // Prioritize smallest integer type
+                // Prioritize smallest integer type for exact matches.
                 if i >= i8::MIN as i64 && i <= i8::MAX as i64 {
                     Ok(fastnbt::Value::Byte(i as i8))
                 } else if i >= i16::MIN as i64 && i <= i16::MAX as i64 {
@@ -80,14 +74,10 @@ fn json_to_fastnbt_value(json_value: &serde_json::Value) -> Result<fastnbt::Valu
                     Ok(fastnbt::Value::Long(i))
                 }
             } else if let Some(f) = n.as_f64() {
-                // Ensure float/double conversion is precise
-                // `Float` (f32) has limited precision. If the number in JSON has many decimal places
-                // but is stored as f32, it might lose precision.
-                // However, NBT is explicit about Float vs Double.
-                // It's safer to generally use Double unless we're certain it's meant to be Float.
-                // `wiki.vg` often specifies which one to use. Let's assume double is default unless float is explicit.
-                // For dimension type data (e.g. `coordinate_scale`), it's `Double`.
-                Ok(fastnbt::Value::Double(f)) // Default to Double for floating points unless absolutely sure it's Float
+                // **CRITICAL CHANGE HERE: Always use Double for floats**
+                // Unless a specific NBT schema tells us it *must* be a Float.
+                // This avoids precision/size mismatches that lead to decoding errors.
+                Ok(fastnbt::Value::Double(f)) 
             } else {
                 Err(ServerError::Protocol(
                     "Invalid number format in JSON NBT conversion".to_string(),
@@ -105,46 +95,36 @@ fn json_to_fastnbt_value(json_value: &serde_json::Value) -> Result<fastnbt::Valu
                 generic_list_elements.push(json_to_fastnbt_value(item)?);
             }
 
-            // This heuristic can still be problematic if the client expects a specific primitive array (e.g., TAG_Int_Array)
-            // but the JSON might not strictly contain only ints (e.g. mixed numbers, or numbers that convert to bytes).
-            // NBT arrays (Byte, Int, Long) must be homogenous. Generic List can contain mixed NBT Value types.
-
-            // To make this more robust, we would need to know the *expected NBT tag type* for each array in the registry JSON.
-            // For example, if it's "TAG_Int_Array" for `heights`, or "TAG_List of Compounds" for `sections`.
-            // Without a schema, the safest is a generic List if it's not explicitly a byte/int/long array.
-
-            // Let's refine the primitive array check to be more strict:
-            let mut all_same_type: Option<u8> = None; // 1: Byte, 2: Short, 3: Int, 4: Long, 5: Float, 6: Double, 7: ByteArray, etc.
+            // Check if it's a homogenous primitive array (ByteArray, IntArray, LongArray)
+            let mut all_same_type_id: Option<u8> = None;
             if !generic_list_elements.is_empty() {
-                all_same_type = Some(get_tag_id(&generic_list_elements[0]));
+                all_same_type_id = Some(get_tag_id(&generic_list_elements[0]));
             }
 
-            let mut is_primitive_array = true;
+            let mut is_homogenous_primitive = true;
             for element in generic_list_elements.iter().skip(1) {
-                if get_tag_id(element) != all_same_type.unwrap_or(0) {
-                    is_primitive_array = false;
+                if get_tag_id(element) != all_same_type_id.unwrap_or(0) {
+                    is_homogenous_primitive = false;
                     break;
                 }
             }
             
-            // Try specific NBT Array types if all elements match and it's a primitive type
-            if is_primitive_array {
-                match all_same_type {
+            if is_homogenous_primitive {
+                match all_same_type_id {
                     Some(1) => Ok(fastnbt::Value::ByteArray(fastnbt::ByteArray::new(generic_list_elements.into_iter().map(|v| match v {fastnbt::Value::Byte(b)=>b, _=>0}).collect()))),
                     Some(3) => Ok(fastnbt::Value::IntArray(fastnbt::IntArray::new(generic_list_elements.into_iter().map(|v| match v {fastnbt::Value::Int(i)=>i, _=>0}).collect()))),
                     Some(4) => Ok(fastnbt::Value::LongArray(fastnbt::LongArray::new(generic_list_elements.into_iter().map(|v| match v {fastnbt::Value::Long(l)=>l, _=>0}).collect()))),
-                    _ => Ok(fastnbt::Value::List(generic_list_elements)), // Fallback to generic list
+                    _ => Ok(fastnbt::Value::List(generic_list_elements)), // Fallback to generic list (TAG_List)
                 }
             } else {
-                Ok(fastnbt::Value::List(generic_list_elements))
+                Ok(fastnbt::Value::List(generic_list_elements)) // If mixed types, must be a generic List
             }
         }
         serde_json::Value::Object(obj) => {
             let mut nbt_compound = std::collections::HashMap::new();
             for (key, value) in obj {
-                // Filter out null values from the compound if they are truly optional and not meant to be a TAG_String("")
                 if value.is_null() {
-                    continue; // Skip null values from the NBT compound
+                    continue; // Skip null values, they should represent absent NBT tags
                 }
                 nbt_compound.insert(key.clone(), json_to_fastnbt_value(value)?);
             }
