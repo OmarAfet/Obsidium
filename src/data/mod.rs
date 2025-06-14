@@ -17,40 +17,10 @@ impl GameData {
     /// Get registry entries for a specific registry type
     pub fn get_registry_entries(&self, registry_name: &str) -> Result<Vec<(String, Vec<u8>)>> {
         match registry_name {
-            "minecraft:dimension_type" => {
-                let mut entries = Vec::new();
-
-                if let Some(overworld_nbt) =
-                    dimension_types::get_dimension_type_nbt("minecraft:overworld")
-                {
-                    entries.push(("minecraft:overworld".to_string(), overworld_nbt));
-                }
-
-                if let Some(nether_nbt) =
-                    dimension_types::get_dimension_type_nbt("minecraft:the_nether")
-                {
-                    entries.push(("minecraft:the_nether".to_string(), nether_nbt));
-                }
-
-                if let Some(end_nbt) = dimension_types::get_dimension_type_nbt("minecraft:the_end")
-                {
-                    entries.push(("minecraft:the_end".to_string(), end_nbt));
-                }
-
-                Ok(entries)
-            }
-            "minecraft:chat_type" => {
-                // Return empty for now - chat types are less critical for basic login
-                Ok(vec![])
-            }
-            "minecraft:damage_type" => {
-                // Return empty for now - damage types are less critical for basic login
-                Ok(vec![])
-            }
-            "minecraft:worldgen/biome" => {
-                // Return empty for now - biomes are less critical for basic login
-                Ok(vec![])
-            }
+            "minecraft:dimension_type" => Ok(dimension_types::get_all_dimension_types()),
+            "minecraft:worldgen/biome" => Ok(biomes::get_all_biomes()),
+            "minecraft:chat_type" => Ok(chat_types::get_all_chat_types()),
+            "minecraft:damage_type" => Ok(damage_types::get_all_damage_types()),
             _ => Err(ServerError::Protocol(format!(
                 "Registry '{}' not supported",
                 registry_name
@@ -60,100 +30,246 @@ impl GameData {
 
     /// Get the essential registries needed for login
     pub fn get_essential_registries(&self) -> Vec<&'static str> {
-        vec!["minecraft:dimension_type"]
+        vec![
+            "minecraft:dimension_type",
+            "minecraft:worldgen/biome",
+            "minecraft:chat_type",
+            "minecraft:damage_type",
+        ]
     }
 }
 
-/// Pre-computed NBT data for essential dimension types
-/// This is a fallback in case the JSON parsing fails
+/// Helper function to convert JSON to NBT bytes
+fn json_to_nbt_bytes(json_value: &serde_json::Value) -> Result<Vec<u8>> {
+    // Convert JSON to fastnbt Value
+    let nbt_value = json_to_fastnbt_value(json_value)?;
+
+    // Serialize using fastnbt's proper NBT format
+    let mut buffer = Vec::new();
+    fastnbt::to_writer(&mut buffer, &nbt_value)
+        .map_err(|e| ServerError::Protocol(format!("Failed to serialize NBT: {}", e)))?;
+
+    Ok(buffer)
+}
+
+/// Convert a JSON value to a fastnbt Value
+fn json_to_fastnbt_value(json_value: &serde_json::Value) -> Result<fastnbt::Value> {
+    match json_value {
+        serde_json::Value::Null => Ok(fastnbt::Value::String("".to_string())),
+        serde_json::Value::Bool(b) => Ok(fastnbt::Value::Byte(if *b { 1 } else { 0 })),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                if i >= i8::MIN as i64 && i <= i8::MAX as i64 {
+                    Ok(fastnbt::Value::Byte(i as i8))
+                } else if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
+                    Ok(fastnbt::Value::Int(i as i32))
+                } else {
+                    Ok(fastnbt::Value::Long(i))
+                }
+            } else if let Some(f) = n.as_f64() {
+                // Use Float for smaller values, Double for larger precision
+                if f.abs() < f32::MAX as f64 {
+                    Ok(fastnbt::Value::Float(f as f32))
+                } else {
+                    Ok(fastnbt::Value::Double(f))
+                }
+            } else {
+                Err(ServerError::Protocol("Invalid number format".to_string()))
+            }
+        }
+        serde_json::Value::String(s) => Ok(fastnbt::Value::String(s.clone())),
+        serde_json::Value::Array(arr) => {
+            if arr.is_empty() {
+                return Ok(fastnbt::Value::List(Vec::new()));
+            }
+
+            // Convert each element
+            let mut nbt_list = Vec::new();
+            for item in arr {
+                nbt_list.push(json_to_fastnbt_value(item)?);
+            }
+            Ok(fastnbt::Value::List(nbt_list))
+        }
+        serde_json::Value::Object(obj) => {
+            let mut nbt_compound = std::collections::HashMap::new();
+            for (key, value) in obj {
+                nbt_compound.insert(key.clone(), json_to_fastnbt_value(value)?);
+            }
+            Ok(fastnbt::Value::Compound(nbt_compound))
+        }
+    }
+}
+
+/// Registry data modules
+
+/// Dimension type registry data
 pub mod dimension_types {
+    use super::*;
     use lazy_static::lazy_static;
 
     lazy_static! {
-        /// Pre-computed NBT data for the overworld dimension type
-        pub static ref OVERWORLD_NBT: Vec<u8> = {
-            // Manually constructed NBT for overworld dimension type
-            let mut nbt_data = std::collections::HashMap::new();
-            nbt_data.insert("ambient_light".to_string(), fastnbt::Value::Float(0.0));
-            nbt_data.insert("bed_works".to_string(), fastnbt::Value::Byte(1));
-            nbt_data.insert("coordinate_scale".to_string(), fastnbt::Value::Double(1.0));
-            nbt_data.insert("effects".to_string(), fastnbt::Value::String("minecraft:overworld".to_string()));
-            nbt_data.insert("has_ceiling".to_string(), fastnbt::Value::Byte(0));
-            nbt_data.insert("has_raids".to_string(), fastnbt::Value::Byte(1));
-            nbt_data.insert("has_skylight".to_string(), fastnbt::Value::Byte(1));
-            nbt_data.insert("height".to_string(), fastnbt::Value::Int(384));
-            nbt_data.insert("infiniburn".to_string(), fastnbt::Value::String("#minecraft:infiniburn_overworld".to_string()));
-            nbt_data.insert("logical_height".to_string(), fastnbt::Value::Int(384));
-            nbt_data.insert("min_y".to_string(), fastnbt::Value::Int(-64));
-            nbt_data.insert("monster_spawn_block_light_limit".to_string(), fastnbt::Value::Int(0));
-            nbt_data.insert("monster_spawn_light_level".to_string(), fastnbt::Value::Int(0));
-            nbt_data.insert("natural".to_string(), fastnbt::Value::Byte(1));
-            nbt_data.insert("piglin_safe".to_string(), fastnbt::Value::Byte(0));
-            nbt_data.insert("respawn_anchor_works".to_string(), fastnbt::Value::Byte(0));
-            nbt_data.insert("ultrawarm".to_string(), fastnbt::Value::Byte(0));
+        static ref REGISTRY_DATA: std::collections::HashMap<&'static str, serde_json::Value> = {
+            let json_str = include_str!("registry_data.json");
+            let full_data: serde_json::Value =
+                serde_json::from_str(json_str).expect("Failed to parse registry_data.json");
 
-            let compound = fastnbt::Value::Compound(nbt_data);
-            fastnbt::to_bytes(&compound).expect("Failed to serialize overworld NBT")
-        };
+            let dimension_data = full_data["minecraft:dimension_type"]
+                .as_object()
+                .expect("dimension_type registry not found");
 
-        /// Pre-computed NBT data for the nether dimension type
-        pub static ref NETHER_NBT: Vec<u8> = {
-            let mut nbt_data = std::collections::HashMap::new();
-            nbt_data.insert("ambient_light".to_string(), fastnbt::Value::Float(0.1));
-            nbt_data.insert("bed_works".to_string(), fastnbt::Value::Byte(0));
-            nbt_data.insert("coordinate_scale".to_string(), fastnbt::Value::Double(8.0));
-            nbt_data.insert("effects".to_string(), fastnbt::Value::String("minecraft:the_nether".to_string()));
-            nbt_data.insert("has_ceiling".to_string(), fastnbt::Value::Byte(1));
-            nbt_data.insert("has_raids".to_string(), fastnbt::Value::Byte(0));
-            nbt_data.insert("has_skylight".to_string(), fastnbt::Value::Byte(0));
-            nbt_data.insert("height".to_string(), fastnbt::Value::Int(256));
-            nbt_data.insert("infiniburn".to_string(), fastnbt::Value::String("#minecraft:infiniburn_nether".to_string()));
-            nbt_data.insert("logical_height".to_string(), fastnbt::Value::Int(128));
-            nbt_data.insert("min_y".to_string(), fastnbt::Value::Int(0));
-            nbt_data.insert("monster_spawn_block_light_limit".to_string(), fastnbt::Value::Int(15));
-            nbt_data.insert("monster_spawn_light_level".to_string(), fastnbt::Value::Int(7));
-            nbt_data.insert("natural".to_string(), fastnbt::Value::Byte(0));
-            nbt_data.insert("piglin_safe".to_string(), fastnbt::Value::Byte(1));
-            nbt_data.insert("respawn_anchor_works".to_string(), fastnbt::Value::Byte(1));
-            nbt_data.insert("ultrawarm".to_string(), fastnbt::Value::Byte(1));
-
-            let compound = fastnbt::Value::Compound(nbt_data);
-            fastnbt::to_bytes(&compound).expect("Failed to serialize nether NBT")
-        };
-
-        /// Pre-computed NBT data for the end dimension type
-        pub static ref END_NBT: Vec<u8> = {
-            let mut nbt_data = std::collections::HashMap::new();
-            nbt_data.insert("ambient_light".to_string(), fastnbt::Value::Float(0.0));
-            nbt_data.insert("bed_works".to_string(), fastnbt::Value::Byte(0));
-            nbt_data.insert("coordinate_scale".to_string(), fastnbt::Value::Double(1.0));
-            nbt_data.insert("effects".to_string(), fastnbt::Value::String("minecraft:the_end".to_string()));
-            nbt_data.insert("has_ceiling".to_string(), fastnbt::Value::Byte(0));
-            nbt_data.insert("has_raids".to_string(), fastnbt::Value::Byte(1));
-            nbt_data.insert("has_skylight".to_string(), fastnbt::Value::Byte(0));
-            nbt_data.insert("height".to_string(), fastnbt::Value::Int(256));
-            nbt_data.insert("infiniburn".to_string(), fastnbt::Value::String("#minecraft:infiniburn_end".to_string()));
-            nbt_data.insert("logical_height".to_string(), fastnbt::Value::Int(256));
-            nbt_data.insert("min_y".to_string(), fastnbt::Value::Int(0));
-            nbt_data.insert("monster_spawn_block_light_limit".to_string(), fastnbt::Value::Int(0));
-            nbt_data.insert("monster_spawn_light_level".to_string(), fastnbt::Value::Int(0));
-            nbt_data.insert("natural".to_string(), fastnbt::Value::Byte(0));
-            nbt_data.insert("piglin_safe".to_string(), fastnbt::Value::Byte(0));
-            nbt_data.insert("respawn_anchor_works".to_string(), fastnbt::Value::Byte(0));
-            nbt_data.insert("ultrawarm".to_string(), fastnbt::Value::Byte(0));
-
-            let compound = fastnbt::Value::Compound(nbt_data);
-            fastnbt::to_bytes(&compound).expect("Failed to serialize end NBT")
+            let mut map = std::collections::HashMap::new();
+            for (key, value) in dimension_data {
+                let static_key: &'static str = Box::leak(key.clone().into_boxed_str());
+                map.insert(static_key, value.clone());
+            }
+            map
         };
     }
 
-    /// Get NBT bytes for a dimension type
-    pub fn get_dimension_type_nbt(dimension_name: &str) -> Option<Vec<u8>> {
-        match dimension_name {
-            "minecraft:overworld" => Some(OVERWORLD_NBT.clone()),
-            "minecraft:the_nether" => Some(NETHER_NBT.clone()),
-            "minecraft:the_end" => Some(END_NBT.clone()),
-            _ => None,
+    /// Get all dimension type registry entries as NBT data
+    pub fn get_all_dimension_types() -> Vec<(String, Vec<u8>)> {
+        let mut entries = Vec::new();
+
+        for (name, data) in REGISTRY_DATA.iter() {
+            match json_to_nbt_bytes(data) {
+                Ok(nbt_bytes) => {
+                    entries.push((name.to_string(), nbt_bytes));
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to convert dimension type {} to NBT: {}", name, e);
+                }
+            }
         }
+
+        entries
+    }
+}
+
+/// Biome registry data
+pub mod biomes {
+    use super::*;
+    use lazy_static::lazy_static;
+
+    lazy_static! {
+        static ref REGISTRY_DATA: std::collections::HashMap<&'static str, serde_json::Value> = {
+            let json_str = include_str!("registry_data.json");
+            let full_data: serde_json::Value =
+                serde_json::from_str(json_str).expect("Failed to parse registry_data.json");
+
+            let biome_data = full_data["minecraft:worldgen/biome"]
+                .as_object()
+                .expect("worldgen/biome registry not found");
+
+            let mut map = std::collections::HashMap::new();
+            for (key, value) in biome_data {
+                let static_key: &'static str = Box::leak(key.clone().into_boxed_str());
+                map.insert(static_key, value.clone());
+            }
+            map
+        };
+    }
+
+    /// Get all biome registry entries as NBT data
+    pub fn get_all_biomes() -> Vec<(String, Vec<u8>)> {
+        let mut entries = Vec::new();
+
+        for (name, data) in REGISTRY_DATA.iter() {
+            match json_to_nbt_bytes(data) {
+                Ok(nbt_bytes) => {
+                    entries.push((name.to_string(), nbt_bytes));
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to convert biome {} to NBT: {}", name, e);
+                }
+            }
+        }
+
+        entries
+    }
+}
+
+/// Chat type registry data
+pub mod chat_types {
+    use super::*;
+    use lazy_static::lazy_static;
+
+    lazy_static! {
+        static ref REGISTRY_DATA: std::collections::HashMap<&'static str, serde_json::Value> = {
+            let json_str = include_str!("registry_data.json");
+            let full_data: serde_json::Value =
+                serde_json::from_str(json_str).expect("Failed to parse registry_data.json");
+
+            let chat_data = full_data["minecraft:chat_type"]
+                .as_object()
+                .expect("chat_type registry not found");
+
+            let mut map = std::collections::HashMap::new();
+            for (key, value) in chat_data {
+                let static_key: &'static str = Box::leak(key.clone().into_boxed_str());
+                map.insert(static_key, value.clone());
+            }
+            map
+        };
+    }
+
+    /// Get all chat type registry entries as NBT data
+    pub fn get_all_chat_types() -> Vec<(String, Vec<u8>)> {
+        let mut entries = Vec::new();
+
+        for (name, data) in REGISTRY_DATA.iter() {
+            match json_to_nbt_bytes(data) {
+                Ok(nbt_bytes) => {
+                    entries.push((name.to_string(), nbt_bytes));
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to convert chat type {} to NBT: {}", name, e);
+                }
+            }
+        }
+
+        entries
+    }
+}
+
+/// Damage type registry data
+pub mod damage_types {
+    use super::*;
+    use lazy_static::lazy_static;
+
+    lazy_static! {
+        static ref REGISTRY_DATA: std::collections::HashMap<&'static str, serde_json::Value> = {
+            let json_str = include_str!("registry_data.json");
+            let full_data: serde_json::Value =
+                serde_json::from_str(json_str).expect("Failed to parse registry_data.json");
+
+            let damage_data = full_data["minecraft:damage_type"]
+                .as_object()
+                .expect("damage_type registry not found");
+
+            let mut map = std::collections::HashMap::new();
+            for (key, value) in damage_data {
+                let static_key: &'static str = Box::leak(key.clone().into_boxed_str());
+                map.insert(static_key, value.clone());
+            }
+            map
+        };
+    }
+
+    /// Get all damage type registry entries as NBT data
+    pub fn get_all_damage_types() -> Vec<(String, Vec<u8>)> {
+        let mut entries = Vec::new();
+
+        for (name, data) in REGISTRY_DATA.iter() {
+            match json_to_nbt_bytes(data) {
+                Ok(nbt_bytes) => {
+                    entries.push((name.to_string(), nbt_bytes));
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to convert damage type {} to NBT: {}", name, e);
+                }
+            }
+        }
+
+        entries
     }
 }

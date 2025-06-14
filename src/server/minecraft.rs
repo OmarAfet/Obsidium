@@ -361,11 +361,17 @@ impl MinecraftServer {
 
                     // Log entry details
                     for entry in &packet.entries {
+                        let data_size = entry.data.as_ref().map_or(0, |d| d.len());
+                        let first_bytes: Vec<u8> = entry
+                            .data
+                            .as_ref()
+                            .map_or(vec![], |d| d.iter().take(16).cloned().collect());
                         tracing::debug!(
-                            "  Entry: {}, has_data: {}, data_size: {}",
+                            "  Entry: {}, has_data: {}, data_size: {}, first_bytes: {:02X?}",
                             entry.entry_id.0,
                             entry.has_data,
-                            entry.data.as_ref().map_or(0, |d| d.len())
+                            data_size,
+                            first_bytes
                         );
                     }
 
@@ -426,31 +432,18 @@ impl MinecraftServer {
     fn create_fallback_dimension_type_registry() -> Result<RegistryDataPacket> {
         use crate::data::dimension_types;
 
+        let entries_data = dimension_types::get_all_dimension_types();
         let mut entries = Vec::new();
 
-        // Add the three main dimension types
-        if let Some(overworld_nbt) = dimension_types::get_dimension_type_nbt("minecraft:overworld")
-        {
+        for (entry_name, nbt_bytes) in entries_data {
             entries.push(RegistryEntry {
-                entry_id: "minecraft:overworld".into(),
-                has_data: true,
-                data: Some(overworld_nbt),
-            });
-        }
-
-        if let Some(nether_nbt) = dimension_types::get_dimension_type_nbt("minecraft:the_nether") {
-            entries.push(RegistryEntry {
-                entry_id: "minecraft:the_nether".into(),
-                has_data: true,
-                data: Some(nether_nbt),
-            });
-        }
-
-        if let Some(end_nbt) = dimension_types::get_dimension_type_nbt("minecraft:the_end") {
-            entries.push(RegistryEntry {
-                entry_id: "minecraft:the_end".into(),
-                has_data: true,
-                data: Some(end_nbt),
+                entry_id: entry_name.into(),
+                has_data: !nbt_bytes.is_empty(),
+                data: if nbt_bytes.is_empty() {
+                    None
+                } else {
+                    Some(nbt_bytes)
+                },
             });
         }
 
