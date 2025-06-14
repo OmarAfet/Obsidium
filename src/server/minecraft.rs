@@ -348,9 +348,9 @@ impl MinecraftServer {
     ) -> Result<()> {
         tracing::debug!("Sending registry data to client");
 
-        // Send essential registries
-        for registry_name in game_data.get_essential_registries() {
-            match Self::create_registry_packet(game_data, registry_name) {
+        // Send all available registries, which is required by modern clients.
+        for registry_name in game_data.get_all_registries() {
+            match Self::create_registry_packet(game_data, &registry_name) {
                 Ok(packet) => {
                     tracing::debug!(
                         "Sending {} registry with {} entries",

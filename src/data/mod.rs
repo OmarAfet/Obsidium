@@ -16,16 +16,46 @@ impl GameData {
 
     /// Get registry entries for a specific registry type
     pub fn get_registry_entries(&self, registry_name: &str) -> Result<Vec<(String, Vec<u8>)>> {
-        match registry_name {
-            "minecraft:dimension_type" => Ok(dimension_types::get_all_dimension_types()),
-            "minecraft:worldgen/biome" => Ok(biomes::get_all_biomes()),
-            "minecraft:chat_type" => Ok(chat_types::get_all_chat_types()),
-            "minecraft:damage_type" => Ok(damage_types::get_all_damage_types()),
-            _ => Err(ServerError::Protocol(format!(
-                "Registry '{}' not supported",
-                registry_name
-            ))),
+        // The provided registry_name might be fully qualified (e.g., "minecraft:dimension_type")
+        // but the JSON key might not be. We'll try both.
+        let short_name = registry_name.split(':').last().unwrap_or(registry_name);
+
+        let json_str = include_str!("registry_data.json");
+        let full_data: serde_json::Value =
+            serde_json::from_str(json_str).expect("Failed to parse registry_data.json");
+
+        let registry_data = full_data
+            .get(registry_name) // Try the full name first
+            .or_else(|| full_data.get(short_name)) // Fallback to the short name
+            .ok_or_else(|| {
+                ServerError::Protocol(format!(
+                    "Registry '{}' not found in registry_data.json",
+                    registry_name
+                ))
+            })?;
+
+        let registry_object = registry_data.as_object().ok_or_else(|| {
+            ServerError::Protocol(format!("Registry '{}' is not a JSON object", registry_name))
+        })?;
+
+        let mut entries = Vec::new();
+        for (entry_name, entry_data) in registry_object {
+            match json_to_nbt_bytes(entry_data) {
+                Ok(nbt_bytes) => {
+                    entries.push((entry_name.clone(), nbt_bytes));
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to convert {} entry {} to NBT: {}",
+                        registry_name,
+                        entry_name,
+                        e
+                    );
+                }
+            }
         }
+
+        Ok(entries)
     }
 
     /// Get the essential registries needed for login
@@ -37,61 +67,70 @@ impl GameData {
             "minecraft:damage_type",
         ]
     }
+
+    /// Get all registries that should be sent to the client.
+    /// This now includes all registries found in the JSON file.
+    pub fn get_all_registries(&self) -> Vec<String> {
+        let json_str = include_str!("registry_data.json");
+        let full_data: serde_json::Value =
+            serde_json::from_str(json_str).expect("Failed to parse registry_data.json");
+
+        full_data
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|key| {
+                if key.contains(':') {
+                    key.clone()
+                } else {
+                    format!("minecraft:{}", key)
+                }
+            })
+            .collect()
+    }
 }
 
 /// Helper function to convert JSON to NBT bytes
 fn json_to_nbt_bytes(json_value: &serde_json::Value) -> Result<Vec<u8>> {
-    // Convert JSON Value to fastnbt Value
     let nbt_value = json_to_fastnbt_value(json_value)?;
 
-    // For registry data, the NBT is expected to be a root Compound tag.
-    // Since Minecraft 1.20.2 (protocol 764), NBT sent over the network excludes
-    // the root compound tag's header (tag ID and name). We need to serialize
-    // just the payload.
-    let buffer = fastnbt::to_bytes(&nbt_value)
+    // Since Minecraft 1.20.2, NBT sent over the network for registries excludes
+    // the root compound tag's name, but includes its ID (0x0A).
+    let mut full_buffer = fastnbt::to_bytes(&nbt_value)
         .map_err(|e| ServerError::Protocol(format!("Failed to serialize NBT: {}", e)))?;
 
-    // fastnbt::to_bytes produces [0x0A, 0x00, 0x00, ...payload...]
-    // We need to skip the first 3 bytes (tag ID + empty name) for network protocol
-    if buffer.len() < 3 {
+    // fastnbt::to_bytes produces [0x0A, 0x00, 0x00, ...payload...].
+    // We need to remove the 2-byte empty name from indices 1 and 2.
+    if full_buffer.len() < 3 || full_buffer[0] != 10 {
         return Err(ServerError::Protocol(
-            "Invalid NBT serialization: buffer too short".to_string(),
+            "Expected a compound NBT tag for registry data".to_string(),
         ));
     }
 
-    Ok(buffer[3..].to_vec())
+    // This creates the correct [0x0A, ...payload...] format.
+    full_buffer.remove(1);
+    full_buffer.remove(1);
+
+    Ok(full_buffer)
 }
 
 /// Convert a JSON value to a fastnbt Value
 fn json_to_fastnbt_value(json_value: &serde_json::Value) -> Result<fastnbt::Value> {
     match json_value {
-        serde_json::Value::Null => {
-            // Represent JSON null as an empty NBT string, as there's no null NBT type.
-            Ok(fastnbt::Value::String("".to_string()))
-        }
-        serde_json::Value::Bool(b) => {
-            // JSON booleans are equivalent to NBT Bytes.
-            Ok(fastnbt::Value::Byte(if *b { 1 } else { 0 }))
-        }
+        serde_json::Value::Null => Ok(fastnbt::Value::String("".to_string())),
+        serde_json::Value::Bool(b) => Ok(fastnbt::Value::Byte(if *b { 1 } else { 0 })),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                // For integers from JSON, use the smallest possible NBT integer type.
-                // This correctly handles numeric boolean flags (like bed_works: 1) as TAG_Byte,
-                // while larger numbers become Short, Int, or Long as appropriate.
-                if i >= i8::MIN as i64 && i <= i8::MAX as i64 {
-                    Ok(fastnbt::Value::Byte(i as i8))
-                } else if i >= i16::MIN as i64 && i <= i16::MAX as i64 {
-                    Ok(fastnbt::Value::Short(i as i16))
-                } else if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
+                // With booleans handled separately, we can now safely assume that
+                // remaining integer-like numbers in registry data are meant to be
+                // TAG_Int, unless they are too large for a 32-bit signed integer.
+                if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
                     Ok(fastnbt::Value::Int(i as i32))
                 } else {
                     Ok(fastnbt::Value::Long(i))
                 }
             } else if let Some(f) = n.as_f64() {
-                // Minecraft's NBT format distinguishes between Float and Double.
-                // We can use a precision check to infer the correct type. If the
-                // f64 value can be represented as an f32 without loss of precision,
-                // we serialize it as a Float. Otherwise, we use a Double.
+                // For floating-point numbers, infer Float vs Double based on precision.
                 let f32_val = f as f32;
                 if (f32_val as f64) == f {
                     Ok(fastnbt::Value::Float(f32_val))
@@ -115,7 +154,6 @@ fn json_to_fastnbt_value(json_value: &serde_json::Value) -> Result<fastnbt::Valu
                 generic_list_elements.push(json_to_fastnbt_value(item)?);
             }
 
-            // Check if it's a homogenous primitive array (ByteArray, IntArray, LongArray)
             let mut all_same_type_id: Option<u8> = None;
             if !generic_list_elements.is_empty() {
                 all_same_type_id = Some(get_tag_id(&generic_list_elements[0]));
@@ -136,7 +174,7 @@ fn json_to_fastnbt_value(json_value: &serde_json::Value) -> Result<fastnbt::Valu
                             .into_iter()
                             .map(|v| match v {
                                 fastnbt::Value::Byte(b) => b,
-                                _ => 0,
+                                _ => 0, // Should not happen
                             })
                             .collect(),
                     ))),
@@ -145,7 +183,7 @@ fn json_to_fastnbt_value(json_value: &serde_json::Value) -> Result<fastnbt::Valu
                             .into_iter()
                             .map(|v| match v {
                                 fastnbt::Value::Int(i) => i,
-                                _ => 0,
+                                _ => 0, // Should not happen
                             })
                             .collect(),
                     ))),
@@ -154,21 +192,21 @@ fn json_to_fastnbt_value(json_value: &serde_json::Value) -> Result<fastnbt::Valu
                             .into_iter()
                             .map(|v| match v {
                                 fastnbt::Value::Long(l) => l,
-                                _ => 0,
+                                _ => 0, // Should not happen
                             })
                             .collect(),
                     ))),
-                    _ => Ok(fastnbt::Value::List(generic_list_elements)), // Fallback to generic list (TAG_List)
+                    _ => Ok(fastnbt::Value::List(generic_list_elements)),
                 }
             } else {
-                Ok(fastnbt::Value::List(generic_list_elements)) // If mixed types, must be a generic List
+                Ok(fastnbt::Value::List(generic_list_elements))
             }
         }
         serde_json::Value::Object(obj) => {
             let mut nbt_compound = std::collections::HashMap::new();
             for (key, value) in obj {
                 if value.is_null() {
-                    continue; // Skip null values, they should represent absent NBT tags
+                    continue;
                 }
                 nbt_compound.insert(key.clone(), json_to_fastnbt_value(value)?);
             }

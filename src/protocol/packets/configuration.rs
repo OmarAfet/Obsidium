@@ -114,7 +114,6 @@ impl Packet for RegistryDataPacket {
             entry.entry_id.write(writer)?;
             crate::protocol::types::write_bool(entry.has_data, writer)?;
             if let Some(ref data) = entry.data {
-                VarInt(data.len() as i32).write(writer)?;
                 writer.write_all(data)?;
             }
         }
