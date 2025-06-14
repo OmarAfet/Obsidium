@@ -55,40 +55,88 @@ fn json_to_nbt_bytes(json_value: &serde_json::Value) -> Result<Vec<u8>> {
 /// Convert a JSON value to a fastnbt Value
 fn json_to_fastnbt_value(json_value: &serde_json::Value) -> Result<fastnbt::Value> {
     match json_value {
-        serde_json::Value::Null => Ok(fastnbt::Value::String("".to_string())),
-        serde_json::Value::Bool(b) => Ok(fastnbt::Value::Byte(if *b { 1 } else { 0 })),
+        serde_json::Value::Null => {
+            // NBT doesn't have a direct null. Represent as empty string for registry data.
+            Ok(fastnbt::Value::String("".to_string()))
+        }
+        serde_json::Value::Bool(b) => {
+            // Booleans are almost always TAG_Byte in NBT
+            Ok(fastnbt::Value::Byte(if *b { 1 } else { 0 }))
+        }
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
+                // Try to fit in smallest possible integer type first, as per NBT spec's typical usage.
                 if i >= i8::MIN as i64 && i <= i8::MAX as i64 {
                     Ok(fastnbt::Value::Byte(i as i8))
+                } else if i >= i16::MIN as i64 && i <= i16::MAX as i64 {
+                    Ok(fastnbt::Value::Short(i as i16))
                 } else if i >= i32::MIN as i64 && i <= i32::MAX as i64 {
                     Ok(fastnbt::Value::Int(i as i32))
                 } else {
                     Ok(fastnbt::Value::Long(i))
                 }
             } else if let Some(f) = n.as_f64() {
-                // Use Float for smaller values, Double for larger precision
-                if f.abs() < f32::MAX as f64 {
+                // Determine if it should be a Float or Double
+                // Floats have less precision. Use if value fits float range.
+                if f.abs() <= f32::MAX as f64 && f.abs() >= f32::MIN as f64 || f == 0.0 {
                     Ok(fastnbt::Value::Float(f as f32))
                 } else {
                     Ok(fastnbt::Value::Double(f))
                 }
             } else {
-                Err(ServerError::Protocol("Invalid number format".to_string()))
+                Err(ServerError::Protocol(
+                    "Invalid number format in JSON NBT conversion".to_string(),
+                ))
             }
         }
         serde_json::Value::String(s) => Ok(fastnbt::Value::String(s.clone())),
         serde_json::Value::Array(arr) => {
+            // Handle specific NBT array types if the context expects them,
+            // otherwise, default to a generic NBT List of values.
+            // This is the tricky part. Without schema information, inferring
+            // Byte/Int/Long arrays from arbitrary JSON arrays is heuristic.
+            // A safer default is a generic List, and let the NBT library
+            // handle the element types.
+
             if arr.is_empty() {
                 return Ok(fastnbt::Value::List(Vec::new()));
             }
 
-            // Convert each element
-            let mut nbt_list = Vec::new();
+            // Try to detect primitive arrays (Byte/Int/Long arrays)
+            let mut all_bytes = true;
+            let mut all_ints = true;
+            let mut all_longs = true;
+            let mut generic_list_elements = Vec::new();
+
             for item in arr {
-                nbt_list.push(json_to_fastnbt_value(item)?);
+                let converted_item = json_to_fastnbt_value(item)?;
+                
+                if !matches!(converted_item, fastnbt::Value::Byte(_)) { all_bytes = false; }
+                if !matches!(converted_item, fastnbt::Value::Int(_)) { all_ints = false; }
+                if !matches!(converted_item, fastnbt::Value::Long(_)) { all_longs = false; }
+
+                generic_list_elements.push(converted_item);
             }
-            Ok(fastnbt::Value::List(nbt_list))
+
+            if all_bytes {
+                let bytes: Vec<i8> = generic_list_elements.into_iter()
+                    .map(|v| match v { fastnbt::Value::Byte(b) => b, _ => 0 }) // Should not hit `_` if `all_bytes` is true
+                    .collect();
+                Ok(fastnbt::Value::ByteArray(fastnbt::ByteArray::new(bytes)))
+            } else if all_ints {
+                let ints: Vec<i32> = generic_list_elements.into_iter()
+                    .map(|v| match v { fastnbt::Value::Int(i) => i, _ => 0 })
+                    .collect();
+                Ok(fastnbt::Value::IntArray(fastnbt::IntArray::new(ints)))
+            } else if all_longs {
+                let longs: Vec<i64> = generic_list_elements.into_iter()
+                    .map(|v| match v { fastnbt::Value::Long(l) => l, _ => 0 })
+                    .collect();
+                Ok(fastnbt::Value::LongArray(fastnbt::LongArray::new(longs)))
+            } else {
+                // If not a primitive array, it's a generic list (TAG_List)
+                Ok(fastnbt::Value::List(generic_list_elements))
+            }
         }
         serde_json::Value::Object(obj) => {
             let mut nbt_compound = std::collections::HashMap::new();
@@ -101,7 +149,6 @@ fn json_to_fastnbt_value(json_value: &serde_json::Value) -> Result<fastnbt::Valu
 }
 
 /// Registry data modules
-
 /// Dimension type registry data
 pub mod dimension_types {
     use super::*;
